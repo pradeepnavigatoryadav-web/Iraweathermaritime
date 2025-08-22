@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Maritime Weather Tool (Open Sources)</title>
+  <!-- Tailwind (CDN) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    html, body { height: 100%; }
+    #map { height: 480px; }
+    .card { @apply bg-white/90 rounded-2xl shadow p-4 border border-slate-200; }
+  </style>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-sky-50 to-indigo-50 text-slate-800">
+  <header class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+    <h1 class="text-2xl sm:text-3xl font-bold tracking-tight">🌊 Maritime Weather Tool <span class="text-slate-500 text-base align-middle">(open data)</span></h1>
+    <p class="text-slate-600 mt-1">Click the map anywhere on the ocean to get waves, SST, and surface currents from open sources.</p>
+  </header>
+
+  <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-16">
+    <div class="grid grid-cols-1 lg:grid-cols-5 gap-6 items-start">
+      <!-- Map -->
+      <section class="lg:col-span-3 card">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="font-semibold">Map</h2>
+          <div class="text-xs text-slate-500">Basemap © OpenStreetMap</div>
+        </div>
+        <div id="map" class="rounded-xl overflow-hidden"></div>
+        <p class="text-xs text-slate-500 mt-2">Tip: click/long-press on the sea. Drag the marker to refine.</p>
+      </section>
+
+      <!-- Right column: Now + Charts -->
+      <section class="lg:col-span-2 space-y-6">
+        <!-- Now card -->
+        <div class="card">
+          <div class="flex items-center justify-between">
+            <h2 class="font-semibold">Now</h2>
+            <span id="status" class="text-xs text-slate-500">Ready</span>
+          </div>
+          <div class="mt-3 grid grid-cols-2 gap-4 text-sm">
+            <div>
+              <div class="text-slate-500">Location</div>
+              <div id="coords" class="font-mono">--</div>
+            </div>
+            <div>
+              <div class="text-slate-500">Time</div>
+              <div id="timeLocal">--</div>
+            </div>
+            <div>
+              <div class="text-slate-500">Sig. Wave Height</div>
+              <div id="nowSwh" class="text-lg font-semibold">--</div>
+            </div>
+            <div>
+              <div class="text-slate-500">Sea Surface Temp</div>
+              <div id="nowSst" class="text-lg font-semibold">--</div>
+            </div>
+            <div>
+              <div class="text-slate-500">Surface Current Speed</div>
+              <div id="nowCur" class="text-lg font-semibold">--</div>
+            </div>
+            <div>
+              <div class="text-slate-500">Surface Current Dir</div>
+              <div id="nowCurDir" class="text-lg font-semibold">--</div>
+            </div>
+          </div>
+          <p class="text-xs text-slate-500 mt-3">Data: <a class="underline" target="_blank" href="https://open-meteo.com/">Open‑Meteo Marine API</a>. Forecast models include ECMWF, NCEP/NOAA WW3, and others depending on region.</p>
+        </div>
+
+        <!-- Charts -->
+        <div class="card">
+          <h2 class="font-semibold">48‑hour Wave Height (m)</h2>
+          <canvas id="chartSwh" height="180"></canvas>
+        </div>
+        <div class="card">
+          <h2 class="font-semibold">48‑hour Sea Surface Temperature (°C)</h2>
+          <canvas id="chartSst" height="180"></canvas>
+        </div>
+        <div class="card">
+          <h2 class="font-semibold">48‑hour Surface Current Speed (kn)</h2>
+          <canvas id="chartCur" height="180"></canvas>
+        </div>
+      </section>
+    </div>
+
+    <!-- Footnotes -->
+    <div class="mt-10 text-xs text-slate-500 space-y-1">
+      <p>⚠️ For navigation safety, always consult official marine forecasts and notices to mariners.</p>
+      <p>Built with open data. No keys required. You can host this page as-is (e.g., GitHub Pages).</p>
+    </div>
+  </main>
+
+  <script>
+    // ---------- Helpers ----------
+    const $ = (id) => document.getElementById(id);
+    const fmt = (n, digits=2) => (n===undefined||n===null||Number.isNaN(n)) ? "--" : Number(n).toFixed(digits);
+    const mpsToKnots = (v) => (v==null? null : v * 1.943844492);
+
+    // ---------- Leaflet Map ----------
+    const latStart = 15.0; // start near Arabian Sea (good for Indian Ocean users)
+    const lonStart = 72.0;
+    const map = L.map('map', { zoomControl: true }).setView([latStart, lonStart], 5);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 10,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    const marker = L.marker([latStart, lonStart], { draggable: true }).addTo(map);
+
+    function setCoords(lat, lon){
+      $('coords').textContent = `${lat.toFixed(3)}, ${lon.toFixed(3)}`;
+    }
+
+    map.on('click', (e) => {
+      marker.setLatLng(e.latlng);
+      setCoords(e.latlng.lat, e.latlng.lng);
+      fetchMarine(e.latlng.lat, e.latlng.lng);
+    });
+    marker.on('dragend', () => {
+      const {lat, lng} = marker.getLatLng();
+      setCoords(lat, lng);
+      fetchMarine(lat, lng);
+    });
+
+    setCoords(latStart, lonStart);
+
+    // ---------- Charts ----------
+    let chartSwh, chartSst, chartCur;
+    function makeChart(ctxId, labels, data, label){
+      const ctx = document.getElementById(ctxId);
+      if(!ctx) return null;
+      const existing = (ctxId === 'chartSwh') ? chartSwh : (ctxId === 'chartSst' ? chartSst : chartCur);
+      if(existing) existing.destroy();
+      const ch = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [{ label, data }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { ticks: { maxTicksLimit: 6 } },
+            y: { beginAtZero: true }
+          }
+        }
+      });
+      if(ctxId === 'chartSwh') chartSwh = ch; else if(ctxId === 'chartSst') chartSst = ch; else chartCur = ch;
+    }
+
+    // ---------- Data Fetch (Open‑Meteo Marine API) ----------
+    async function fetchMarine(lat, lon){
+      $('status').textContent = 'Loading…';
+      try {
+        const params = new URLSearchParams({
+          latitude: lat,
+          longitude: lon,
+          hourly: [
+            'wave_height',
+            'sea_surface_temperature',
+            'ocean_current_velocity',
+            'ocean_current_direction'
+          ].join(','),
+          current: ['wave_height','sea_surface_temperature','ocean_current_velocity','ocean_current_direction'].join(','),
+          timezone: 'auto'
+        });
+        const url = `https://marine-api.open-meteo.com/v1/marine?${params.toString()}`;
+        const res = await fetch(url);
+        if(!res.ok) throw new Error('API error');
+        const data = await res.json();
+
+        // Current values
+        const cur = data.current || {};
+        $('timeLocal').textContent = cur.time || '--';
+        $('nowSwh').textContent = cur.wave_height != null ? `${fmt(cur.wave_height, 2)} m` : '--';
+        $('nowSst').textContent = cur.sea_surface_temperature != null ? `${fmt(cur.sea_surface_temperature, 1)} °C` : '--';
+        const curKn = mpsToKnots(cur.ocean_current_velocity);
+        $('nowCur').textContent = curKn != null ? `${fmt(curKn, 2)} kn` : '--';
+        $('nowCurDir').textContent = cur.ocean_current_direction != null ? `${Math.round(cur.ocean_current_direction)}°` : '--';
+
+        // Hourly series (limit to next 48 hours)
+        const h = data.hourly || {};
+        const times = (h.time || []).slice(0, 48).map(t => t.replace('T','\n'));
+        makeChart('chartSwh', times, (h.wave_height || []).slice(0,48), 'Wave height');
+        makeChart('chartSst', times, (h.sea_surface_temperature || []).slice(0,48), 'SST');
+        const curKnSeries = (h.ocean_current_velocity || []).slice(0,48).map(mpsToKnots);
+        makeChart('chartCur', times, curKnSeries, 'Current speed');
+        $('status').textContent = 'Loaded';
+      } catch (err){
+        console.error(err);
+        $('status').textContent = 'Error';
+        alert('Failed to load data. Try another point over the ocean.');
+      }
+    }
+
+    // Initial fetch
+    fetchMarine(latStart, lonStart);
+  </script>
+</body>
+</html>
