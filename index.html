@@ -11,16 +11,19 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
   <!-- Chart.js -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <!-- Windy API -->
+  <script src="https://api.windy.com/assets/map-forecast/libBoot.js"></script>
   <style>
     html, body { height: 100%; }
     #map { height: 480px; }
+    #windy { height: 500px; width: 100%; }
     .card { @apply bg-white/90 rounded-2xl shadow p-4 border border-slate-200; }
   </style>
 </head>
 <body class="min-h-screen bg-gradient-to-br from-sky-50 to-indigo-50 text-slate-800">
   <header class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
     <h1 class="text-2xl sm:text-3xl font-bold tracking-tight">🌊 Maritime Weather Tool <span class="text-slate-500 text-base align-middle">(open data)</span></h1>
-    <p class="text-slate-600 mt-1">Click the map anywhere on the ocean to get waves, SST, and surface currents from open sources.</p>
+    <p class="text-slate-600 mt-1">Click the map anywhere on the ocean to get waves, SST, and surface currents from open sources. Windy forecast map stays in sync.</p>
   </header>
 
   <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-16">
@@ -32,7 +35,7 @@
           <div class="text-xs text-slate-500">Basemap © OpenStreetMap</div>
         </div>
         <div id="map" class="rounded-xl overflow-hidden"></div>
-        <p class="text-xs text-slate-500 mt-2">Tip: click/long-press on the sea. Drag the marker to refine.</p>
+        <p class="text-xs text-slate-500 mt-2">Tip: click/long-press on the sea. Drag the marker to refine. Windy forecast map updates too.</p>
       </section>
 
       <!-- Right column: Now + Charts -->
@@ -69,29 +72,36 @@
               <div id="nowCurDir" class="text-lg font-semibold">--</div>
             </div>
           </div>
-          <p class="text-xs text-slate-500 mt-3">Data: <a class="underline" target="_blank" href="https://open-meteo.com/">Open‑Meteo Marine API</a>. Forecast models include ECMWF, NCEP/NOAA WW3, and others depending on region.</p>
+          <p class="text-xs text-slate-500 mt-3">Data: <a class="underline" target="_blank" href="https://open-meteo.com/">Open-Meteo Marine API</a>. Forecast models include ECMWF, NCEP/NOAA WW3, and others depending on region.</p>
         </div>
 
         <!-- Charts -->
         <div class="card">
-          <h2 class="font-semibold">48‑hour Wave Height (m)</h2>
+          <h2 class="font-semibold">48-hour Wave Height (m)</h2>
           <canvas id="chartSwh" height="180"></canvas>
         </div>
         <div class="card">
-          <h2 class="font-semibold">48‑hour Sea Surface Temperature (°C)</h2>
+          <h2 class="font-semibold">48-hour Sea Surface Temperature (°C)</h2>
           <canvas id="chartSst" height="180"></canvas>
         </div>
         <div class="card">
-          <h2 class="font-semibold">48‑hour Surface Current Speed (kn)</h2>
+          <h2 class="font-semibold">48-hour Surface Current Speed (kn)</h2>
           <canvas id="chartCur" height="180"></canvas>
         </div>
       </section>
     </div>
 
+    <!-- Windy API Map -->
+    <section class="mt-10 card">
+      <h2 class="font-semibold mb-3">Windy.com Forecast Map (Synced)</h2>
+      <div id="windy" class="rounded-xl overflow-hidden"></div>
+      <p class="text-xs text-slate-500 mt-2">Interactive forecast from <a class="underline" target="_blank" href="https://windy.com">Windy.com</a>. Overlays: wind, waves, currents, and more. Synced with Leaflet marker.</p>
+    </section>
+
     <!-- Footnotes -->
     <div class="mt-10 text-xs text-slate-500 space-y-1">
       <p>⚠️ For navigation safety, always consult official marine forecasts and notices to mariners.</p>
-      <p>Built with open data. No keys required. You can host this page as-is (e.g., GitHub Pages).</p>
+      <p>Built with open data. Requires Windy API key (free for personal use). Host via GitHub Pages.</p>
     </div>
   </main>
 
@@ -102,7 +112,7 @@
     const mpsToKnots = (v) => (v==null? null : v * 1.943844492);
 
     // ---------- Leaflet Map ----------
-    const latStart = 15.0; // start near Arabian Sea (good for Indian Ocean users)
+    const latStart = 15.0; // start near Arabian Sea
     const lonStart = 72.0;
     const map = L.map('map', { zoomControl: true }).setView([latStart, lonStart], 5);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -120,11 +130,13 @@
       marker.setLatLng(e.latlng);
       setCoords(e.latlng.lat, e.latlng.lng);
       fetchMarine(e.latlng.lat, e.latlng.lng);
+      if(window.windyMap) windyMap.setView([e.latlng.lat, e.latlng.lng]);
     });
     marker.on('dragend', () => {
       const {lat, lng} = marker.getLatLng();
       setCoords(lat, lng);
       fetchMarine(lat, lng);
+      if(window.windyMap) windyMap.setView([lat, lng]);
     });
 
     setCoords(latStart, lonStart);
@@ -138,36 +150,25 @@
       if(existing) existing.destroy();
       const ch = new Chart(ctx, {
         type: 'line',
-        data: {
-          labels,
-          datasets: [{ label, data }]
-        },
+        data: { labels, datasets: [{ label, data }] },
         options: {
           responsive: true,
           maintainAspectRatio: false,
           plugins: { legend: { display: false } },
-          scales: {
-            x: { ticks: { maxTicksLimit: 6 } },
-            y: { beginAtZero: true }
-          }
+          scales: { x: { ticks: { maxTicksLimit: 6 } }, y: { beginAtZero: true } }
         }
       });
       if(ctxId === 'chartSwh') chartSwh = ch; else if(ctxId === 'chartSst') chartSst = ch; else chartCur = ch;
     }
 
-    // ---------- Data Fetch (Open‑Meteo Marine API) ----------
+    // ---------- Data Fetch (Open-Meteo Marine API) ----------
     async function fetchMarine(lat, lon){
       $('status').textContent = 'Loading…';
       try {
         const params = new URLSearchParams({
           latitude: lat,
           longitude: lon,
-          hourly: [
-            'wave_height',
-            'sea_surface_temperature',
-            'ocean_current_velocity',
-            'ocean_current_direction'
-          ].join(','),
+          hourly: [ 'wave_height','sea_surface_temperature','ocean_current_velocity','ocean_current_direction' ].join(','),
           current: ['wave_height','sea_surface_temperature','ocean_current_velocity','ocean_current_direction'].join(','),
           timezone: 'auto'
         });
@@ -185,7 +186,7 @@
         $('nowCur').textContent = curKn != null ? `${fmt(curKn, 2)} kn` : '--';
         $('nowCurDir').textContent = cur.ocean_current_direction != null ? `${Math.round(cur.ocean_current_direction)}°` : '--';
 
-        // Hourly series (limit to next 48 hours)
+        // Hourly series (next 48h)
         const h = data.hourly || {};
         const times = (h.time || []).slice(0, 48).map(t => t.replace('T','\n'));
         makeChart('chartSwh', times, (h.wave_height || []).slice(0,48), 'Wave height');
@@ -202,6 +203,20 @@
 
     // Initial fetch
     fetchMarine(latStart, lonStart);
+
+    // ---------- Windy Init ----------
+    const options = {
+      key: 'YOUR_WINDY_API_KEY', // <-- replace with your real Windy API key
+      lat: latStart,
+      lon: lonStart,
+      zoom: 5,
+      overlay: 'waves'
+    };
+
+    windyInit(options, function(windyAPI) {
+      const { map } = windyAPI;
+      window.windyMap = map; // save global reference
+    });
   </script>
 </body>
 </html>
